@@ -5,7 +5,7 @@ if __name__ == "__main__":
     password = "hunter2"
 
     my_session = pyvse.VSESession(username, password)
-    my_game = Game("mygamename", my_session)
+    my_game = pyvse.Game("mygamename", my_session)
 
-    goog = Stock("STOCK-NSQ-GOOG")
+    goog = pyvse.Stock("STOCK-NSQ-GOOG")
     my_game.buy(goog, 500)
