@@ -8,6 +8,9 @@
 
     Author: Kevin Chen
     Email: kvchen@berkeley.edu
+
+    Contributor: Andrew Han
+    Email: handrew@stanford.edu
 """
 
 import requests
@@ -16,6 +19,7 @@ import json
 from datetime import datetime, date, timedelta
 from time import mktime
 from bs4 import BeautifulSoup
+from math import fabs
 
 STOCK_ACTIONS = ["Buy", "Sell", "Short", "Cover"]
 TIME_DELAY = 5
@@ -30,7 +34,8 @@ URL_SUFFIX = {
     "game": BASE_URL + "/game/{0}",
     "trade": BASE_URL + "/game/{0}/trade?week=1", 
     "submit_order": BASE_URL + "/game/{0}/trade/submitorder?week=1",
-    "holdings_info": BASE_URL + "/game/{0}/portfolio/Holdings?partial=True"
+    "holdings_info": BASE_URL + "/game/{0}/portfolio/Holdings?partial=True",
+    "value": BASE_URL + "/game/{0}/portfolio/Holdings"
 }
 
 def mw_url(suffix, *args):
@@ -93,8 +98,16 @@ class Game(object):
         self.game_id = game_id
         self.vse_session = vse_session
 
-        self.positions = [] # array of stock objects
+        self.positions = {} # array of stock objects
         self.__updatePositions()
+
+    @property
+    def value(self):
+        r = self.vse_session.session.get(mw_url("value", self.game_id))
+        soup = BeautifulSoup(r.text)
+        worth = soup.find('ul', {"class": "performance"}).li.find('span', {"class": "data"}).getText()
+        worth = worth.replace("$", "").replace(",", "")
+        return float(worth)
 
     def transaction(self, ticker, shares, action):
         """Carries out a transaction on a Stock object.
@@ -124,19 +137,89 @@ class Game(object):
 
         self.__updatePositions()
 
+    def __getNumberOfSharesToInvest(self, ticker, moneyToSpend):
+        obj = self.stock(ticker)
+        price = obj.price
+        numSharesToInvest = int(moneyToSpend / price)
+        return numSharesToInvest
+
     def rebalance(self, stockWeights):
         self.__updatePositions()
+        value = self.value
 
         if (len(self.positions) == 0):
-            print "execute trades and set positions to what they are"
-            self.positions = holdings
+            for ticker in stockWeights:
+                weight = stockWeights[ticker]
+                moneyToSpend = weight * value
+                numSharesToBuy = self.__getNumberOfSharesToInvest(ticker, moneyToSpend)
+                self.transaction(ticker, numSharesToBuy, "Buy")
         else:
-            print "we're gonna have to rebalance"
+            # Note that we are assuming some amount of margin.
+            ownedTickers = self.__positionNames()
+            targetTickers = list(stockWeights.keys())
+
+            """ Positions we currently have that we need to exit completely """
+            for ticker in ownedTickers:
+                if ticker not in targetTickers:
+                    numSharesOwned = self.positions[ticker].position
+                    action = "Sell" if numSharesOwned > 0 else "Cover"
+                    numSharesOwned = fabs(numSharesOwned)
+                    self.transaction(ticker, numSharesOwned, action)
+
+            self.__updatePositions()
+
+            ############################
+            ownedTickers = self.__positionNames()
+            targetTickers = list(stockWeights.keys())
+
+            """ Overlap between positions we have a little bit of and need to rebalance """
+            for ticker in ownedTickers:
+                if ticker in targetTickers:
+                    weight = stockWeights[ticker]
+                    moneyToInvest = weight * value
+                    numSharesToHave = self.__getNumberOfSharesToInvest(ticker, moneyToInvest)
+                    currentPosition = self.positions[ticker].position
+
+                    action = "Buy"
+                    if (currentPosition < 0):
+                        if (numSharesToHave > currentPosition):
+                            action = "Cover"
+                        else:
+                            action = "Short"
+                    else:
+                        if (numSharesToHave > currentPosition):
+                            action = "Buy"
+                        else:
+                            action = "Sell"
+
+                    difference = fabs(currentPosition - numSharesToHave)
+
+                    self.transaction(ticker, difference, action)
+
+            self.__updatePositions()
+
+            ############################
+            ownedTickers = self.__positionNames()
+            targetTickers = list(stockWeights.keys())
+
+            """ Positions we don't have that we need to initialize """
+            for ticker in targetTickers:
+                if ticker not in ownedTickers:
+                    weight = stockWeights[ticker]
+                    moneyToSpend = weight * value
+                    numSharesToBuy = self.__getNumberOfSharesToInvest(ticker, moneyToSpend)
+                    self.transaction(ticker, numSharesToBuy, "Buy") 
+
+        self.__updatePositions()
 
     def __updatePositions(self):
         r = self.vse_session.session.get(mw_url("holdings_info", self.game_id))
         soup = BeautifulSoup(r.text)
-        allRows = soup.find('table', {'class': 'highlight'}).tbody.findAll('tr')
+
+        try: 
+            allRows = soup.find('table', {'class': 'highlight'}).tbody.findAll('tr')
+        except AttributeError:
+            allRows = []
 
         for i in range(0, len(allRows)):
             symbol = allRows[i]['data-ticker']
@@ -150,11 +233,10 @@ class Game(object):
 
             stockObj = self.stock(symbol, trading_symbol = trading_symbol, position = position)
 
-            self.positions.append(stockObj)
+            self.positions[symbol] = (stockObj)
 
-    def printPositions(self):
-        for obj in self.positions:
-            print obj.symbol, obj.position
+    def __positionNames(self):
+        return list(self.positions.keys())
 
     def buy(self, ticker, shares):
         self.transaction(ticker, shares, "Buy")
@@ -180,8 +262,8 @@ class Stock():
         """
 
         self.symbol = symbol
-        self.trading_symbol = trading_symbol if type(trading_symbol) != type(None) else self.get_trading_symbol()
         self.game = game
+        self.trading_symbol = trading_symbol if type(trading_symbol) != type(None) else self.get_trading_symbol()
 
         self.position = position
 
